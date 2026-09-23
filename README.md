@@ -226,8 +226,10 @@ The list comes from OpenCode itself (`opencode debug config`, its own merge of e
 source), which costs about a second at start-up. `JEV_OPENCODE_CHECK=off` skips it. If OpenCode
 cannot be asked, the launcher says nothing and starts as usual.
 
-An `OPENCODE_CONFIG_CONTENT` you already set is kept: the launcher lays its default models and the
-`jev-gateway` provider over it, and leaves the rest (agents, permissions, other providers) alone.
+An `OPENCODE_CONFIG_CONTENT` you already set is kept, comments and trailing commas included: the
+launcher lays its default models and the `jev-gateway` provider over it, and leaves the rest
+(agents, permissions, other providers) alone. Content that is not a JSON object cannot be merged,
+so the session gets only the launcher's settings, and the launcher says so before OpenCode starts.
 
 On the dashboard, a gateway that shows **Idle** received nothing, which is what a bypassing agent
 looks like. One that shows **Passthrough only** received requests and did not route them, with
@@ -253,6 +255,7 @@ jev-opencode --dashboard      # open the monitoring dashboard in your browser
 | `JEV_OPENCODE_UPSTREAM_BASE_URL` | `https://api.openai.com/v1` | Where the gateway forwards OpenCode traffic: your LLM provider, not the TypeSafe endpoint |
 | `JEV_OPENCODE_MODEL` | `gpt-5` | Model selected as `jev-gateway/<model>` |
 | `JEV_OPENCODE_PORT` | `8791` | Router port for OpenCode |
+| `JEV_OPENCODE_CHECK` | on | `off` skips asking OpenCode which agents bypass the gateway, which saves about a second at start-up |
 
 The gateway forwards the client's `Authorization` header to the LLM upstream. A launcher-spawned
 gateway strips `UPSTREAM_API_KEY`/`ROUTER_API_KEY` by design, so the client's own key always

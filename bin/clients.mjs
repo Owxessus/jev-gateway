@@ -111,20 +111,32 @@ function opencodeInlineConfig(origin) {
 
 const isObject = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 
+// Each matches a whole string first, so that `//` in a URL and a comma inside quotes are kept.
+const JSONC_COMMENT = /"(?:\\.|[^"\\])*"|\/\/[^\n]*|\/\*[\s\S]*?\*\//g;
+const JSONC_TRAILING_COMMA = /"(?:\\.|[^"\\])*"|,(?=\s*[}\]])/g;
+const keepStrings = (match) => (match.startsWith('"') ? match : "");
+
+/**
+ * OpenCode reads its inline config as JSONC, comments and trailing commas included, so plain
+ * `JSON.parse` would throw away content OpenCode accepts. Undefined when it does not parse.
+ */
+export function parseJsonc(text) {
+  try {
+    return JSON.parse(text.replace(JSONC_COMMENT, keepStrings).replace(JSONC_TRAILING_COMMA, keepStrings));
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * OPENCODE_CONFIG_CONTENT is one variable, and the user may already be using it. Theirs is kept
  * and the gateway's is laid over it: the default models and the `jev-gateway` provider are the
  * launcher's to set, everything else (agents, permissions, other providers) stays as they wrote
- * it. Content that is not a JSON object is what OpenCode itself would refuse, so it is dropped.
+ * it. Content that is not a JSON object cannot be merged, so it is dropped, and the notices say so.
  */
 export function opencodeConfigContent(origin, inherited) {
   const ours = opencodeInlineConfig(origin);
-  let theirs;
-  try {
-    theirs = inherited?.trim() ? JSON.parse(inherited) : undefined;
-  } catch {
-    theirs = undefined;
-  }
+  const theirs = inherited?.trim() ? parseJsonc(inherited) : undefined;
   if (!isObject(theirs)) return JSON.stringify(ours);
   const provider = { ...(isObject(theirs.provider) ? theirs.provider : {}), ...ours.provider };
   return JSON.stringify({ ...theirs, ...ours, provider });
@@ -153,17 +165,26 @@ function modelFlag(argv) {
  * looks exactly like one where Jev had nothing to decide, so they are said out loud.
  *
  * `resolved` is what `opencode debug config` prints: OpenCode's own merge of every config source,
- * which is the only reliable way to know what an agent will use.
+ * which is the only reliable way to know what an agent will use. A provider counts as covered by
+ * where it sends requests, not by its name, so one the user pointed at the gateway (`origin`)
+ * themselves is not reported.
  */
-export function opencodeOutsideGateway(resolved, argv = []) {
+export function opencodeOutsideGateway(resolved, argv = [], origin) {
+  const providers = isObject(resolved) && isObject(resolved.provider) ? resolved.provider : {};
+  const covered = (model) => {
+    const id = providerOf(model);
+    if (id === OPENCODE_PROVIDER) return true;
+    const baseURL = id === undefined ? undefined : providers[id]?.options?.baseURL;
+    return origin !== undefined && typeof baseURL === "string" && (baseURL === origin || baseURL.startsWith(`${origin}/`));
+  };
   const outside = [];
   const flag = modelFlag(argv);
-  if (flag !== undefined && providerOf(flag) !== OPENCODE_PROVIDER) outside.push(`this session (--model ${flag})`);
+  if (flag !== undefined && !covered(flag)) outside.push(`this session (--model ${flag})`);
   if (isObject(resolved)) {
-    if (providerOf(resolved.model) !== OPENCODE_PROVIDER) outside.push(`the default model (${resolved.model ?? "none"})`);
+    if (!covered(resolved.model)) outside.push(`the default model (${resolved.model ?? "none"})`);
     for (const [name, agent] of Object.entries(isObject(resolved.agent) ? resolved.agent : {})) {
       if (!isObject(agent) || agent.disable === true || typeof agent.model !== "string") continue;
-      if (providerOf(agent.model) !== OPENCODE_PROVIDER) outside.push(`agent "${name}" (${agent.model})`);
+      if (!covered(agent.model)) outside.push(`agent "${name}" (${agent.model})`);
     }
   }
   if (outside.length === 0) return [];
@@ -179,8 +200,11 @@ function opencodeResolvedConfig(env) {
   return new Promise((resolve) => {
     execFile("opencode", ["debug", "config"], { env, timeout: 5000, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
       if (error) return resolve(undefined);
+      // Log lines may come first, and may hold braces of their own: the JSON starts on a line of its own.
+      const start = stdout.search(/^\{/m);
+      if (start < 0) return resolve(undefined);
       try {
-        resolve(JSON.parse(stdout.slice(stdout.indexOf("{"))));
+        resolve(JSON.parse(stdout.slice(start)));
       } catch {
         resolve(undefined);
       }
@@ -207,11 +231,18 @@ export const opencode = {
     OPENCODE_EXPERIMENTAL_NATIVE_LLM: "false",
     OPENCODE_EXPERIMENTAL_CODE_MODE: "false",
   }),
-  // Costs about a second, which is OpenCode loading its configuration. JEV_OPENCODE_CHECK=off skips it.
+  // Asking OpenCode costs about a second, which is OpenCode loading its configuration.
+  // JEV_OPENCODE_CHECK=off skips that part; an inline config that had to be dropped is always said.
   notices: async (origin, argv, inherited = process.env) => {
-    if (inherited.JEV_OPENCODE_CHECK === "off") return [];
+    const content = inherited.OPENCODE_CONFIG_CONTENT;
+    const dropped = content?.trim() && !isObject(parseJsonc(content))
+      ? ["OPENCODE_CONFIG_CONTENT in your environment is not a JSON object, so this session gets only the gateway's settings from it."]
+      : [];
+    if (inherited.JEV_OPENCODE_CHECK === "off") return dropped;
     const resolved = await opencodeResolvedConfig({ ...inherited, ...opencode.env(origin, inherited) });
-    return opencodeOutsideGateway(resolved, argv);
+    const outside = opencodeOutsideGateway(resolved, argv, origin);
+    // The launcher prefixes only the first line with its name; a second notice needs its own.
+    return dropped.length && outside.length ? [...dropped, `${opencode.name}: ${outside[0]}`, ...outside.slice(1)] : [...dropped, ...outside];
   },
   configHelp: (origin) => {
     // No OPENCODE_CONFIG_CONTENT one-liner here: single-quoting raw JSON breaks when a custom
